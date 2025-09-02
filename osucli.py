@@ -4,29 +4,28 @@ import time
 import curses
 import math
 import threading
-import queue
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple, Set
 from enum import Enum
 
 # ---------------- CONFIG ----------------
 OSU_FILE = "t+pazolite - Oshama Scramble! ([ A v a l o n ]) [EXPERT].osu"
 
-# Key bindings for different key modes (using curses key codes)
+# Key bindings for different key modes
 DEFAULT_BINDS = {
-    4: [ord('d'), ord('f'), ord('j'), ord('k')],
-    5: [ord('d'), ord('f'), ord(' '), ord('j'), ord('k')],
-    6: [ord('s'), ord('d'), ord('f'), ord('j'), ord('k'), ord('l')],
-    7: [ord('s'), ord('d'), ord('f'), ord(' '), ord('j'), ord('k'), ord('l')],
-    8: [ord('a'), ord('s'), ord('d'), ord('f'), ord('j'), ord('k'), ord('l'), ord(';')],
+    4: ['d', 'f', 'j', 'k'],
+    5: ['d', 'f', ' ', 'j', 'k'],
+    6: ['s', 'd', 'f', 'j', 'k', 'l'],
+    7: ['s', 'd', 'f', ' ', 'j', 'k', 'l'],
+    8: ['a', 's', 'd', 'f', 'j', 'k', 'l', ';'],
 }
 
-# Hit windows (ms) - more accurate to osu!mania
-HIT_WINDOW_PERFECT = 16   # 300 (Perfect)
-HIT_WINDOW_GREAT = 40     # 300 (Great)
-HIT_WINDOW_GOOD = 73      # 200 (Good)
-HIT_WINDOW_BAD = 103      # 100 (Bad)
-HIT_WINDOW_MISS = 127     # 50 (Miss)
+# Hit windows (ms) - osu!mania style
+HIT_WINDOW_PERFECT = 16   # 320 points
+HIT_WINDOW_GREAT = 40     # 300 points  
+HIT_WINDOW_GOOD = 73      # 200 points
+HIT_WINDOW_BAD = 103      # 100 points
+HIT_WINDOW_MISS = 127     # 0 points
 HOLD_RELEASE_WINDOW = 100
 
 # Scoring values
@@ -37,19 +36,19 @@ SCORE_BAD = 100
 SCORE_MISS = 0
 
 # Visuals
-SCROLL_SPEED = 500        # pixels per second
-LANE_WIDTH = 6           # wider lanes for better visibility
-NOTE_HEAD = "●"
-NOTE_BODY = "█"
-HOLD_HEAD = "◆"
-HOLD_BODY = "█"
-HIT_LINE_CHAR = "━"
-LANE_DIVIDER = "│"
-HIT_EFFECT_CHARS = ["★", "✦", "✧", "·"]
+SCROLL_MS_PER_ROW = 24   # Default scroll speed (lower = faster)
+LANE_WIDTH = 6
+NOTE_HEAD = "O"          # Use ASCII for better compatibility
+NOTE_BODY = "|"
+HOLD_HEAD = "H"
+HOLD_BODY = "|"
+HIT_LINE_CHAR = "="
+LANE_DIVIDER = "|"
+HIT_EFFECT_CHARS = ["*", "+", ".", " "]
 
-# Audio
-AUDIO_OFFSET_MS = 0      # Global audio offset
-SCROLL_MS_PER_ROW = 12   # Default scroll speed
+# Audio alternatives
+AUDIO_OFFSET_MS = 0
+USE_BEEP = False  # Use terminal beep for audio feedback
 # ----------------------------------------
 
 class Judgment(Enum):
@@ -64,7 +63,7 @@ class HitEffect:
     lane: int
     time_created: int
     judgment: Judgment
-    duration: int = 300  # ms
+    duration: int = 400  # ms
 
 @dataclass
 class Note:
@@ -98,66 +97,70 @@ class Stats:
         max_value = self.total_notes * 320
         return (total_value / max_value) * 100 if max_value > 0 else 100.0
 
-class InputHandler:
-    """Handle input using curses with key state tracking"""
-    def __init__(self, stdscr, keys: int):
-        self.stdscr = stdscr
-        self.keys = keys
-        self.binds = DEFAULT_BINDS.get(keys, [ord('d'), ord('f'), ord('j'), ord('k')])
-        self.held = {i: False for i in range(1, keys + 1)}
-        self.keymap = {key_code: i + 1 for i, key_code in enumerate(self.binds)}
-        self.key_states = {}
-        self.last_update = time.time() * 1000
+class SimpleAudioManager:
+    """Simple audio manager using system tools"""
+    def __init__(self):
+        self.audio_file = None
+        self.audio_process = None
+        self.start_time = None
         
-    def update(self, current_time: int) -> Tuple[List[int], List[int]]:
-        """Returns (pressed_lanes, released_lanes)"""
-        pressed = []
-        released = []
-        
-        # Get all available input
-        while True:
-            key = self.stdscr.getch()
-            if key == -1:  # No more input
-                break
-                
-            if key in self.keymap:
-                lane = self.keymap[key]
-                if not self.held[lane]:  # New press
-                    self.held[lane] = True
-                    pressed.append(lane)
-                    
-        # Check for releases (simple timeout-based for now)
-        # In a real implementation, you'd want proper key up/down detection
-        for lane in range(1, self.keys + 1):
-            if self.held[lane]:
-                # Auto-release after short time if no re-press (simulated key up)
-                # This is a workaround since curses doesn't have proper key up events
-                pass
-                
-        return pressed, released
-    
-    def release_lane(self, lane: int) -> bool:
-        """Manually release a lane (for hold notes)"""
-        if self.held[lane]:
-            self.held[lane] = False
+    def load_music(self, filepath: str) -> bool:
+        if os.path.exists(filepath):
+            self.audio_file = filepath
             return True
+        return False
+    
+    def play(self):
+        if self.audio_file:
+            try:
+                # Try to use common Linux audio players
+                import subprocess
+                # Try different audio players available on most Linux systems
+                players = ['mpv', 'mplayer', 'aplay', 'paplay']
+                
+                for player in players:
+                    try:
+                        if player == 'mpv':
+                            self.audio_process = subprocess.Popen([
+                                'mpv', '--no-video', '--quiet', self.audio_file
+                            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        elif player == 'mplayer':
+                            self.audio_process = subprocess.Popen([
+                                'mplayer', '-quiet', self.audio_file
+                            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        else:
+                            continue
+                        
+                        self.start_time = time.time()
+                        return
+                    except (FileNotFoundError, subprocess.SubprocessError):
+                        continue
+            except ImportError:
+                pass
+    
+    def is_playing(self) -> bool:
+        if self.audio_process:
+            return self.audio_process.poll() is None
         return False
 
 # ---------- .osu parsing ----------
 def parse_osu_file(path: str):
     sections = {}
     current = None
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("//"):
-                continue
-            if line.startswith("[") and line.endswith("]"):
-                current = line[1:-1]
-                sections[current] = []
-            else:
-                if current:
-                    sections[current].append(line)
+    try:
+        with open(path, encoding="utf-8", errors='ignore') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("//"):
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    current = line[1:-1]
+                    sections[current] = []
+                else:
+                    if current:
+                        sections[current].append(line)
+    except Exception as e:
+        raise Exception(f"Failed to parse .osu file: {e}")
     return sections
 
 def parse_hitobjects(hitobject_lines: List[str], keys: int) -> List[Note]:
@@ -169,20 +172,24 @@ def parse_hitobjects(hitobject_lines: List[str], keys: int) -> List[Note]:
         if len(parts) < 5:
             continue
             
-        x = int(parts[0])
-        t = int(parts[2])
-        obj_type = int(parts[3])
-        
-        # Calculate lane (1-indexed)
-        lane = int(x / lane_width) + 1
-        lane = max(1, min(keys, lane))
+        try:
+            x = int(parts[0])
+            t = int(parts[2])
+            obj_type = int(parts[3])
+            
+            # Calculate lane (1-indexed)
+            lane = int(x / lane_width) + 1
+            lane = max(1, min(keys, lane))
 
-        if obj_type & 128:  # Long note (hold)
-            extras = parts[5].split(":")
-            end_time = int(extras[0])
-            notes.append(Note(time=t, lane=lane, kind="hold", end_time=end_time))
-        else:  # Normal note
-            notes.append(Note(time=t, lane=lane, kind="normal"))
+            if obj_type & 128:  # Long note (hold)
+                if len(parts) > 5:
+                    extras = parts[5].split(":")
+                    end_time = int(extras[0])
+                    notes.append(Note(time=t, lane=lane, kind="hold", end_time=end_time))
+            else:  # Normal note
+                notes.append(Note(time=t, lane=lane, kind="normal"))
+        except (ValueError, IndexError):
+            continue  # Skip malformed lines
     
     notes.sort(key=lambda n: (n.time, n.lane))
     return notes
@@ -203,7 +210,6 @@ def calculate_judgment(delta: int) -> Judgment:
         return Judgment.MISS
 
 def get_score_for_judgment(judgment: Judgment) -> int:
-    """Get score value for judgment"""
     return {
         Judgment.PERFECT: SCORE_PERFECT,
         Judgment.GREAT: SCORE_GREAT,
@@ -236,6 +242,22 @@ def update_stats(stats: Stats, judgment: Judgment):
     
     stats.max_combo = max(stats.max_combo, stats.combo)
 
+# ---------- Audio Feedback ----------
+def play_hit_sound(judgment: Judgment):
+    """Play audio feedback using system beep or other methods"""
+    if not USE_BEEP:
+        return
+        
+    try:
+        if judgment in [Judgment.PERFECT, Judgment.GREAT]:
+            # High pitched beep for good hits
+            os.system("echo -e '\a' > /dev/null 2>&1")
+        elif judgment == Judgment.MISS:
+            # Different sound for miss (if possible)
+            pass
+    except:
+        pass
+
 # ---------- Rendering ----------
 def get_note_y_position(note_time: int, current_time: int, hit_line_y: int) -> int:
     """Calculate note Y position based on scroll speed"""
@@ -248,7 +270,7 @@ def draw_note(stdscr, note: Note, x: int, y: int, current_time: int, play_height
     if note.kind == "normal":
         if 0 <= y < play_height:
             try:
-                # Add color based on approach
+                # Add highlighting for approaching notes
                 time_until_hit = note.time - current_time
                 if abs(time_until_hit) <= HIT_WINDOW_GREAT:
                     stdscr.addstr(y, x, NOTE_HEAD.center(LANE_WIDTH), curses.A_BOLD)
@@ -278,35 +300,46 @@ def draw_note(stdscr, note: Note, x: int, y: int, current_time: int, play_height
 def draw_hit_effects(stdscr, effects: List[HitEffect], current_time: int, start_x: int, hit_y: int):
     """Draw hit effects"""
     for effect in effects[:]:
-        if current_time - effect.time_created > effect.duration:
+        age = current_time - effect.time_created
+        if age > effect.duration:
             effects.remove(effect)
             continue
             
         # Animate effect
-        progress = (current_time - effect.time_created) / effect.duration
+        progress = age / effect.duration
         char_idx = min(len(HIT_EFFECT_CHARS) - 1, int(progress * len(HIT_EFFECT_CHARS)))
         char = HIT_EFFECT_CHARS[char_idx]
         
+        if char == " ":  # Effect finished
+            continue
+            
         lane_x = start_x + (effect.lane - 1) * (LANE_WIDTH + 1)
         
         try:
-            # Color based on judgment
+            # Different attributes for different judgments
             attr = curses.A_BOLD
             if effect.judgment == Judgment.PERFECT:
-                attr |= curses.A_REVERSE
+                attr |= curses.A_STANDOUT
             elif effect.judgment == Judgment.MISS:
-                attr |= curses.A_DIM
+                attr = curses.A_DIM
                 
             stdscr.addstr(hit_y - 1, lane_x + LANE_WIDTH//2, char, attr)
         except curses.error:
             pass
 
 def draw_frame(stdscr, keys: int, notes: List[Note], current_time: int, stats: Stats, 
-              held: Dict[int, bool], effects: List[HitEffect]):
+              held: Dict[int, bool], effects: List[HitEffect], scroll_multiplier: float):
     """Draw the main game frame"""
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    play_height = h - 6
+    
+    # Ensure minimum terminal size
+    if h < 20 or w < 30:
+        stdscr.addstr(0, 0, "Terminal too small! Need at least 30x20")
+        stdscr.refresh()
+        return
+        
+    play_height = h - 7
     start_x = max(0, (w - (keys * LANE_WIDTH + (keys - 1))) // 2)
     hit_line_y = play_height - 3
 
@@ -315,7 +348,7 @@ def draw_frame(stdscr, keys: int, notes: List[Note], current_time: int, stats: S
         lane_x = start_x + (lane - 1) * (LANE_WIDTH + 1)
         
         # Lane divider
-        if lane > 1:
+        if lane > 1 and lane_x > 0:
             for yy in range(play_height):
                 try:
                     stdscr.addstr(yy, lane_x - 1, LANE_DIVIDER)
@@ -326,11 +359,13 @@ def draw_frame(stdscr, keys: int, notes: List[Note], current_time: int, stats: S
         if held.get(lane, False):
             for yy in range(play_height):
                 try:
-                    stdscr.addstr(yy, lane_x, " " * LANE_WIDTH, curses.A_REVERSE)
+                    if lane_x >= 0 and lane_x + LANE_WIDTH < w:
+                        stdscr.addstr(yy, lane_x, " " * LANE_WIDTH, curses.A_REVERSE)
                 except curses.error:
                     pass
 
     # Draw notes
+    visible_notes = 0
     for note in notes:
         if note.judged and note.kind == "normal":
             continue
@@ -341,13 +376,15 @@ def draw_frame(stdscr, keys: int, notes: List[Note], current_time: int, stats: S
         lane_x = start_x + (note.lane - 1) * (LANE_WIDTH + 1)
         
         # Only draw notes that are visible
-        if -10 <= y <= play_height + 10:
+        if -5 <= y <= play_height + 5 and lane_x >= 0:
             draw_note(stdscr, note, lane_x, y, current_time, play_height, hit_line_y)
+            visible_notes += 1
 
     # Draw hit line
     try:
-        hit_line = HIT_LINE_CHAR * (keys * LANE_WIDTH + (keys - 1))
-        stdscr.addstr(hit_line_y, start_x, hit_line, curses.A_BOLD)
+        if start_x >= 0 and start_x + (keys * LANE_WIDTH + (keys - 1)) < w:
+            hit_line = HIT_LINE_CHAR * (keys * LANE_WIDTH + (keys - 1))
+            stdscr.addstr(hit_line_y, start_x, hit_line, curses.A_BOLD)
     except curses.error:
         pass
 
@@ -364,24 +401,28 @@ def draw_frame(stdscr, keys: int, notes: List[Note], current_time: int, stats: S
         acc_line = f"Accuracy: {stats.accuracy:.2f}%"
         stdscr.addstr(play_height + 2, 0, acc_line)
         
-        judgment_line = f"Perfect: {stats.perfect} | Great: {stats.great} | Good: {stats.good} | Bad: {stats.bad} | Miss: {stats.miss}"
+        judgment_line = f"P:{stats.perfect} G:{stats.great} Good:{stats.good} Bad:{stats.bad} M:{stats.miss}"
         if len(judgment_line) < w - 1:
             stdscr.addstr(play_height + 3, 0, judgment_line)
         
-        # Controls - show actual keys
-        key_chars = [chr(k) if k != ord(' ') else 'SPC' for k in DEFAULT_BINDS.get(keys, [ord('d'), ord('f'), ord('j'), ord('k')])]
-        controls = f"Keys: {' '.join(key_chars)} | Q: Quit | +/-: Speed"
-        stdscr.addstr(play_height + 4, 0, controls)
+        # Controls
+        key_display = [k if k != ' ' else 'SPC' for k in DEFAULT_BINDS.get(keys, ['d', 'f', 'j', 'k'])]
+        controls = f"Keys: {' '.join(key_display)} | Q:quit +/-:speed"
+        if len(controls) < w - 1:
+            stdscr.addstr(play_height + 4, 0, controls)
+            
+        # Debug info
+        stdscr.addstr(play_height + 5, 0, f"Notes visible: {visible_notes} | Speed: {scroll_multiplier:.1f}x")
     except curses.error:
         pass
     
     stdscr.refresh()
 
 # ---------- Game Logic ----------
-def handle_note_hit(note: Note, current_time: int, stats: Stats, effects: List[HitEffect]) -> bool:
+def handle_note_hit(note: Note, current_time: int, stats: Stats, effects: List[HitEffect]) -> Judgment:
     """Handle hitting a note head"""
     if note.judged:
-        return False
+        return Judgment.MISS
         
     delta = current_time - note.time
     judgment = calculate_judgment(delta)
@@ -393,11 +434,12 @@ def handle_note_hit(note: Note, current_time: int, stats: Stats, effects: List[H
         note.hold_active = True
     
     update_stats(stats, judgment)
-    
-    # Add hit effect
     effects.append(HitEffect(note.lane, current_time, judgment))
     
-    return judgment != Judgment.MISS
+    # Audio feedback
+    play_hit_sound(judgment)
+    
+    return judgment
 
 def handle_hold_release(note: Note, current_time: int, stats: Stats, effects: List[HitEffect]):
     """Handle releasing a hold note"""
@@ -431,22 +473,8 @@ def check_missed_notes(notes: List[Note], current_time: int, stats: Stats, effec
             and note.end_time and current_time - note.end_time > HOLD_RELEASE_WINDOW):
             handle_hold_release(note, current_time, stats, effects)
 
-def try_load_audio(audio_file: str, beatmap_dir: str) -> bool:
-    """Try to load audio with pygame, fallback gracefully"""
-    try:
-        import pygame.mixer as mixer
-        mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
-        
-        song_file = os.path.join(beatmap_dir, audio_file)
-        if os.path.exists(song_file):
-            mixer.music.load(song_file)
-            return True
-    except (ImportError, Exception):
-        pass
-    return False
-
 def run_game(stdscr):
-    """Main game loop"""
+    """Main game loop - pure curses implementation"""
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.timeout(1)  # 1ms timeout for responsive input
@@ -459,14 +487,8 @@ def run_game(stdscr):
     # Parse beatmap
     try:
         sections = parse_osu_file(OSU_FILE)
-    except FileNotFoundError:
-        stdscr.addstr(0, 0, f"Error: Could not find beatmap file:")
-        stdscr.addstr(1, 0, f"{OSU_FILE}")
-        stdscr.addstr(2, 0, "Press any key to exit...")
-        stdscr.getch()
-        return
     except Exception as e:
-        stdscr.addstr(0, 0, f"Error parsing beatmap: {e}")
+        stdscr.addstr(0, 0, f"Error: {str(e)}")
         stdscr.addstr(1, 0, "Press any key to exit...")
         stdscr.getch()
         return
@@ -476,7 +498,10 @@ def run_game(stdscr):
     if "Difficulty" in sections:
         for line in sections["Difficulty"]:
             if line.startswith("CircleSize"):
-                keys = int(float(line.split(":")[1]))
+                try:
+                    keys = int(float(line.split(":")[1]))
+                except (ValueError, IndexError):
+                    pass
                 break
 
     # Parse notes
@@ -490,41 +515,48 @@ def run_game(stdscr):
         stdscr.getch()
         return
 
-    # Set up input handler
-    input_handler = InputHandler(stdscr, keys)
+    # Set up key bindings
+    binds = DEFAULT_BINDS.get(keys, ['d', 'f', 'j', 'k'])
+    keymap = {}
+    for i, key_char in enumerate(binds):
+        if isinstance(key_char, str):
+            keymap[ord(key_char)] = i + 1
+        else:
+            keymap[key_char] = i + 1
 
-    # Try to load audio
+    # Set up audio
+    audio_manager = SimpleAudioManager()
     audio_loaded = False
-    audio_file = None
+    
     if "General" in sections:
         for line in sections["General"]:
             if line.startswith("AudioFilename"):
                 audio_file = line.split(":", 1)[1].strip()
+                song_file = os.path.join(os.path.dirname(OSU_FILE), audio_file)
+                audio_loaded = audio_manager.load_music(song_file)
                 break
-
-    if audio_file:
-        audio_loaded = try_load_audio(audio_file, os.path.dirname(OSU_FILE))
 
     # Game state
     stats = Stats()
     effects = []
     game_started = False
     scroll_speed_multiplier = 1.0
-    last_frame_time = time.time()
+    held = {i: False for i in range(1, keys + 1)}
+    key_hold_times = {}  # Track how long keys are held
 
     # Show ready screen
     stdscr.erase()
     try:
-        stdscr.addstr(0, 0, f"osu!mania {keys}K Enhanced")
-        key_display = [chr(k) if k != ord(' ') else 'SPACE' for k in DEFAULT_BINDS.get(keys, [ord('d'), ord('f'), ord('j'), ord('k')])]
+        stdscr.addstr(0, 0, f"osu!mania {keys}K (Pure Curses Edition)")
+        key_display = [k if k != ' ' else 'SPACE' for k in binds]
         stdscr.addstr(1, 0, f"Keys: {' | '.join(key_display)}")
         stdscr.addstr(2, 0, f"Notes: {len(notes)}")
-        if audio_loaded:
-            stdscr.addstr(3, 0, f"Audio: {audio_file}")
-        else:
-            stdscr.addstr(3, 0, "Audio: Not loaded (pygame not available)")
-        stdscr.addstr(5, 0, "Press SPACE to start")
-        stdscr.addstr(6, 0, "Press Q to quit")
+        stdscr.addstr(3, 0, f"Audio: {'Loaded' if audio_loaded else 'Not available'}")
+        stdscr.addstr(5, 0, "Controls:")
+        stdscr.addstr(6, 0, "  SPACE - Start game")
+        stdscr.addstr(7, 0, "  Q - Quit")
+        stdscr.addstr(8, 0, "  +/- - Adjust scroll speed")
+        stdscr.addstr(10, 0, "Press SPACE to start!")
         stdscr.refresh()
     except curses.error:
         pass
@@ -541,26 +573,16 @@ def run_game(stdscr):
     # Start game
     start_time = time.time() * 1000
     if audio_loaded:
-        try:
-            import pygame.mixer as mixer
-            mixer.music.play()
-        except:
-            pass
+        audio_manager.play()
     
-    game_started = True
     running = True
+    last_frame_time = time.time()
 
-    # Key state tracking for proper hold note handling
-    key_press_times = {}
-    
     while running:
         current_frame_time = time.time()
-        frame_delta = current_frame_time - last_frame_time
-        last_frame_time = current_frame_time
-        
         current_time = int(time.time() * 1000 - start_time) + AUDIO_OFFSET_MS
 
-        # Handle input
+        # Handle all available input
         while True:
             key = stdscr.getch()
             if key == -1:  # No more input
@@ -570,82 +592,86 @@ def run_game(stdscr):
                 running = False
                 break
             elif key == ord('+') or key == ord('='):
-                scroll_speed_multiplier = min(2.0, scroll_speed_multiplier + 0.1)
+                scroll_speed_multiplier = min(3.0, scroll_speed_multiplier + 0.1)
                 global SCROLL_MS_PER_ROW
                 SCROLL_MS_PER_ROW = max(1, int(12 / scroll_speed_multiplier))
-            elif key == ord('-'):
-                scroll_speed_multiplier = max(0.5, scroll_speed_multiplier - 0.1)
+            elif key == ord('-') or key == ord('_'):
+                scroll_speed_multiplier = max(0.3, scroll_speed_multiplier - 0.1)
                 SCROLL_MS_PER_ROW = max(1, int(12 / scroll_speed_multiplier))
-            elif key in input_handler.keymap:
-                lane = input_handler.keymap[key]
+            elif key in keymap:
+                lane = keymap[key]
                 
                 # Handle key press
-                if lane not in key_press_times:  # New press
-                    key_press_times[lane] = current_time
-                    input_handler.held[lane] = True
+                if not held[lane]:  # New press
+                    held[lane] = True
+                    key_hold_times[lane] = current_time
                     
                     # Find hittable note in this lane
+                    best_note = None
+                    best_delta = float('inf')
+                    
                     for note in notes:
-                        if (note.lane == lane and not note.judged and 
-                            abs(current_time - note.time) <= HIT_WINDOW_MISS):
-                            handle_note_hit(note, current_time, stats, effects)
-                            break
+                        if (note.lane == lane and not note.judged):
+                            delta = abs(current_time - note.time)
+                            if delta <= HIT_WINDOW_MISS and delta < best_delta:
+                                best_note = note
+                                best_delta = delta
+                    
+                    if best_note:
+                        handle_note_hit(best_note, current_time, stats, effects)
                 else:
-                    # Key is being held - update hold time
-                    key_press_times[lane] = current_time
+                    # Key being held - update hold time
+                    key_hold_times[lane] = current_time
 
-        # Handle key releases (detect when keys are no longer being pressed)
-        current_held = set(key_press_times.keys())
-        for lane in list(key_press_times.keys()):
-            # If key hasn't been pressed recently, consider it released
-            if current_time - key_press_times[lane] > 50:  # 50ms timeout
-                del key_press_times[lane]
-                input_handler.held[lane] = False
-                
-                # Handle hold note releases
-                for note in notes:
-                    if (note.lane == lane and note.kind == "hold" and 
-                        note.hold_active and not note.hold_judged):
-                        handle_hold_release(note, current_time, stats, effects)
+        # Auto-release keys that haven't been pressed recently (simulate key up)
+        release_timeout = 100  # ms
+        for lane in list(key_hold_times.keys()):
+            if current_time - key_hold_times[lane] > release_timeout:
+                if held[lane]:
+                    held[lane] = False
+                    # Handle hold note releases
+                    for note in notes:
+                        if (note.lane == lane and note.kind == "hold" and 
+                            note.hold_active and not note.hold_judged):
+                            handle_hold_release(note, current_time, stats, effects)
+                del key_hold_times[lane]
 
         # Check for missed notes
         check_missed_notes(notes, current_time, stats, effects)
 
         # Render frame
-        draw_frame(stdscr, keys, notes, current_time, stats, input_handler.held, effects)
+        draw_frame(stdscr, keys, notes, current_time, stats, held, effects, scroll_speed_multiplier)
 
-        # Check if song is finished
-        if audio_loaded:
-            try:
-                import pygame.mixer as mixer
-                if not mixer.music.get_busy():
-                    # Check if all notes are judged
-                    all_judged = all(note.judged and (note.kind != "hold" or note.hold_judged) 
-                                   for note in notes)
-                    if all_judged:
-                        break
-            except:
-                pass
-        else:
-            # Without audio, end when all notes are judged
-            all_judged = all(note.judged and (note.kind != "hold" or note.hold_judged) 
-                           for note in notes)
-            if all_judged:
-                break
+        # Check if all notes are finished
+        all_judged = all(note.judged and (note.kind != "hold" or note.hold_judged) 
+                        for note in notes)
+        if all_judged:
+            time.sleep(2)  # Show final state for a moment
+            break
 
-        # Maintain 60 FPS
-        time.sleep(max(0, 1/60 - (time.time() - current_frame_time)))
+        # Check if audio finished (approximate)
+        if audio_loaded and audio_manager.start_time:
+            # Simple time-based check since we can't reliably check if audio is playing
+            elapsed = (time.time() - audio_manager.start_time)
+            if elapsed > 300:  # 5 minutes max - adjust as needed
+                if all_judged:
+                    break
 
-    # Game over screen
+        # Maintain framerate
+        frame_time = time.time() - current_frame_time
+        sleep_time = max(0, 1/60 - frame_time)
+        time.sleep(sleep_time)
+
+    # Show results
     show_results(stdscr, stats, keys)
 
 def show_results(stdscr, stats: Stats, keys: int):
     """Show final results screen"""
     stdscr.erase()
     try:
-        stdscr.addstr(0, 0, "┌─────────────────────────────┐")
-        stdscr.addstr(1, 0, "│        Game Complete!       │")
-        stdscr.addstr(2, 0, "└─────────────────────────────┘")
+        stdscr.addstr(0, 0, "=" * 35)
+        stdscr.addstr(1, 0, "         GAME COMPLETE!")
+        stdscr.addstr(2, 0, "=" * 35)
         
         stdscr.addstr(4, 0, f"Final Score: {stats.score:,}")
         stdscr.addstr(5, 0, f"Max Combo: {stats.max_combo}")
@@ -657,6 +683,7 @@ def show_results(stdscr, stats: Stats, keys: int):
         stdscr.addstr(11, 0, f"  Good:    {stats.good:4d}")
         stdscr.addstr(12, 0, f"  Bad:     {stats.bad:4d}")
         stdscr.addstr(13, 0, f"  Miss:    {stats.miss:4d}")
+        stdscr.addstr(14, 0, f"  Total:   {stats.total_notes:4d}")
         
         # Calculate grade
         if stats.accuracy >= 95:
@@ -670,39 +697,81 @@ def show_results(stdscr, stats: Stats, keys: int):
         else:
             grade = "D"
             
-        stdscr.addstr(15, 0, f"Grade: {grade}", curses.A_BOLD)
-        stdscr.addstr(17, 0, "Press any key to exit...")
+        stdscr.addstr(16, 0, f"Grade: {grade}", curses.A_BOLD | curses.A_STANDOUT)
+        
+        stdscr.addstr(18, 0, "Press any key to exit...")
         stdscr.refresh()
+        
+        # Wait for key press
+        stdscr.nodelay(False)
         stdscr.getch()
     except curses.error:
         pass
 
-# -------- Entry --------
+def test_keys(stdscr):
+    """Test key detection"""
+    stdscr.nodelay(True)
+    stdscr.timeout(1)
+    
+    stdscr.addstr(0, 0, "Key Test Mode")
+    stdscr.addstr(1, 0, "Press keys to test detection (Q to quit)")
+    stdscr.addstr(3, 0, "Expected 4K keys: d, f, j, k")
+    
+    row = 5
+    while True:
+        key = stdscr.getch()
+        if key == -1:
+            continue
+        if key == ord('q') or key == ord('Q'):
+            break
+            
+        stdscr.addstr(row, 0, f"Key pressed: {key} ({chr(key) if 32 <= key <= 126 else 'special'})")
+        row += 1
+        if row > 20:
+            stdscr.erase()
+            stdscr.addstr(0, 0, "Key Test Mode")
+            stdscr.addstr(1, 0, "Press keys to test detection (Q to quit)")
+            row = 3
+        stdscr.refresh()
+
 def main():
-    """Main entry point with better error handling"""
+    """Main entry point"""
+    if len(sys.argv) > 1 and sys.argv[1] == "--test-keys":
+        print("Starting key test mode...")
+        curses.wrapper(test_keys)
+        return
+        
     if not os.path.exists(OSU_FILE):
-        print(f"Error: Beatmap file not found: {OSU_FILE}")
-        print("Please update the OSU_FILE path in the script.")
+        print(f"Error: Beatmap file not found:")
+        print(f"{OSU_FILE}")
+        print("\nPlease update the OSU_FILE path in the script.")
+        print("You can also test key detection with: python3 script.py --test-keys")
         return
     
+    print("osu!mania Clone (Pure Python Edition)")
+    print("=" * 40)
+    print("This version uses only standard Python libraries")
+    print("No pygame dependency required!")
+    print()
+    print("Audio support:")
+    print("- Tries to use system audio players (mpv, mplayer)")
+    print("- Falls back to terminal beeps")
+    print()
+    print("Controls will be shown in game")
+    print("Press Enter to continue...")
+    input()
+    
     try:
-        # Test if we can import pygame (optional)
-        try:
-            import pygame
-            print("Pygame detected - audio support enabled")
-        except ImportError:
-            print("Pygame not found - running without audio")
-            print("Install with: sudo pacman -S python-pygame  # Arch Linux")
-        
         curses.wrapper(run_game)
     except KeyboardInterrupt:
-        pass
+        print("\nGame interrupted by user")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"\nError: {e}")
         print("\nTroubleshooting:")
         print("1. Make sure the .osu file path is correct")
-        print("2. Install pygame for audio: sudo pacman -S python-pygame")
-        print("3. Make sure your terminal supports UTF-8")
+        print("2. Check terminal size (need at least 30x20)")
+        print("3. Test keys with: python3 script.py --test-keys")
+        print("4. For audio install: sudo apt install mpv")
 
 if __name__ == "__main__":
     main()
